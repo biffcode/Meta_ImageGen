@@ -3,6 +3,7 @@ import base64
 import sys
 import os
 import time
+from PIL import Image, ImageStat
 
 # --- METAESTHETICS MASTER PROMPT BLOCK ---
 META_BASE = """Hyperrealistic professional medical photography,
@@ -13,6 +14,11 @@ Subject: natural skin texture, real pores, micro-imperfections.
 Neutral expression. Photorealism score: maximum.
 Aspect ratio: 16:9, landscape orientation, widescreen format."""
 
+# --- LOGO PATHS ---
+LOGOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logos")
+LOGO_WHITE = os.path.join(LOGOS_DIR, "Logo_Horizontal_TM_white.png")
+LOGO_BROWN = os.path.join(LOGOS_DIR, "Logo_Horizontal_TM_brown.png")
+
 
 def get_api_key():
     """Read API key from environment variable or local config file."""
@@ -21,7 +27,7 @@ def get_api_key():
     if key:
         return key
 
-    # 2. Try config file in skill directory
+    # 2. Try config file in skill root
     config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.txt")
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
@@ -32,12 +38,62 @@ def get_api_key():
     return None
 
 
+def apply_logo(input_path):
+    """
+    Detect brightness at the logo placement area and overlay the correct logo.
+    - Brightness > 180  -> brown logo (light background)
+    - Brightness < 100  -> white logo (dark background)
+    - In between        -> white logo (safer default)
+    Saves a separate _watermarked copy, original is preserved.
+    """
+    img = Image.open(input_path).convert("RGBA")
+
+    # Sample the actual logo placement zone for accurate brightness reading
+    margin = 50
+    sample_w = int(img.width * 0.20)
+    sample_h = int(sample_w * 0.35)
+    sample_area = (margin, margin, margin + sample_w, margin + sample_h)
+    crop = img.convert("RGB").crop(sample_area)
+    brightness = sum(ImageStat.Stat(crop).mean) / 3
+
+    if brightness > 180:
+        logo_path = LOGO_BROWN
+        variant = "brown"
+    else:
+        logo_path = LOGO_WHITE
+        variant = "white"
+
+    print(f"Brightness: {brightness:.1f} -> {variant} logo")
+
+    if not os.path.exists(logo_path):
+        print(f"Warning: logo not found at {logo_path}, skipping watermark.")
+        return input_path
+
+    logo = Image.open(logo_path).convert("RGBA")
+
+    # Scale to 20% of image width, preserve aspect ratio
+    target_width = int(img.width * 0.20)
+    scale = target_width / logo.width
+    target_height = int(logo.height * scale)
+    logo = logo.resize((target_width, target_height), Image.LANCZOS)
+
+    # Paste at top-left with 50px fixed margin
+    img.paste(logo, (margin, margin), logo)
+
+    # Save as a separate watermarked file — original untouched
+    base, ext = os.path.splitext(input_path)
+    output_path = f"{base}_watermarked{ext}"
+    img.convert("RGB").save(output_path, "PNG")
+    print(f"Watermarked image saved to {output_path}")
+    return output_path
+
+
 def generate_image(prompt, model="google/gemini-2.5-flash-image"):
     api_key = get_api_key()
     if not api_key:
         print("ERROR: No API key found.")
         print("Set it via environment variable:  OPENROUTER_API_KEY=sk-or-...")
-        print("Or create a config.txt file in the skill root with:  OPENROUTER_API_KEY=sk-or-...")
+        print("Or create a config.txt in the skill root with:  OPENROUTER_API_KEY=sk-or-...")
         sys.exit(1)
 
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -84,19 +140,21 @@ def generate_image(prompt, model="google/gemini-2.5-flash-image"):
             filepath = os.path.join(os.path.expanduser("~"), "Downloads", filename)
 
             if image_data.startswith("data:image"):
-                # Base64 encoded image
                 _, encoded = image_data.split("base64,", 1)
                 img_bytes = base64.b64decode(encoded)
                 with open(filepath, "wb") as f:
                     f.write(img_bytes)
             else:
-                # Remote URL — download it
                 print("Downloading image...")
                 img_bytes = requests.get(image_data).content
                 with open(filepath, "wb") as f:
                     f.write(img_bytes)
 
             print(f"SUCCESS: Image saved to {filepath}")
+
+            # Apply Metaesthetics logo watermark
+            apply_logo(filepath)
+
         else:
             print("No image generated. The model returned text instead:")
             if "choices" in res_json:
